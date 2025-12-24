@@ -1,0 +1,22 @@
+@import "tailwindcss"; /* v4 只要這一行 */
+
+/* 確保全域高度為 100% */
+html, body, #root {
+  height: 100vh !important;
+  width: 100vw !important;
+  margin: 0;
+  padding: 0;
+  overflow: hidden; 
+  background-color: #C3CCD8;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 捲軸美化 */
+.custom-scrollbar::-webkit-scrollbar { width: 8px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: #AEB9C8; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: #5B6B7E; border-radius: 10px; }
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #424952; }
