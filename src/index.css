@@ -1,6 +1,6 @@
-@import "tailwindcss"; /* v4 只要這一行 */
+@import "tailwindcss";
 
-/* 確保全域高度為 100% */
+/* 以下保持原本的捲軸與高度設定 */
 html, body, #root {
   height: 100vh !important;
   width: 100vw !important;

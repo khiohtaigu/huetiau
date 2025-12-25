@@ -1,57 +1,75 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { auth, db, googleProvider } from './firebase'; 
 import { signInWithPopup, onAuthStateChanged, signOut } from 'firebase/auth';
-import { collection, query, onSnapshot, doc, updateDoc, writeBatch, getDocs, setDoc, increment, where, deleteDoc } from 'firebase/firestore';
+import { collection, query, onSnapshot, doc, updateDoc, writeBatch, getDocs, setDoc, increment, where, deleteDoc, getDoc } from 'firebase/firestore';
 import * as XLSX from 'xlsx';
 import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js';
 import { Doughnut } from 'react-chartjs-2';
-import { LogOut, Upload, Camera, CheckSquare, XSquare, FileText, Loader2, User, ChevronDown, ChevronUp, PencilLine, Eye, ShieldCheck, ListFilter, Trash2 } from 'lucide-react';
+import { LogOut, Upload, Camera, CheckSquare, XSquare, FileText, Loader2, User, ChevronDown, ChevronUp, PencilLine, Eye, ShieldCheck, ListFilter, Trash2, GraduationCap, MapPin, Briefcase } from 'lucide-react';
 import { toPng } from 'html-to-image';
 
 ChartJS.register(ArcElement, Tooltip, Legend);
 
 function App() {
   const [user, setUser] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [formData, setFormData] = useState({ schoolName: '', region: '台北市', role: '導師' });
+
   const [allStudents, setAllStudents] = useState([]);
   const [receipts, setReceipts] = useState([]); 
   const [activeReceiptId, setActiveReceiptId] = useState(null); 
   const [visitorCount, setVisitorCount] = useState(0);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true); // 初始載入狀態
   const [isUploading, setIsUploading] = useState(false);
-  
-  // 顯示標題狀態
-  const [eventTitle, setEventTitle] = useState(""); 
+  const [localTitle, setLocalTitle] = useState(""); 
   
   const [expandedGrade, setExpandedGrade] = useState("高一");
   const [activeClass, setActiveClass] = useState(null); 
   const reportRef = useRef(null);
   const isFirstLoadRef = useRef(true);
 
-  // 1. 監聽登入與統計
+  // 1. 初始化與登入監聽 (加入 try-catch 防止卡死)
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-    });
-    const trackVisitor = async () => {
+    const unsubscribe = onAuthStateChanged(auth, async (u) => {
       try {
-        const statsRef = doc(db, "system", "stats");
-        if (!sessionStorage.getItem('hasVisited')) {
-          await setDoc(statsRef, { views: increment(1) }, { merge: true });
-          sessionStorage.setItem('hasVisited', 'true');
+        if (u) {
+          setUser(u);
+          // 嘗試讀取 Profile
+          const profileRef = doc(db, "user_profiles", u.uid);
+          const profileSnap = await getDoc(profileRef);
+          if (profileSnap.exists()) {
+            setUserProfile(profileSnap.data());
+            setShowOnboarding(false);
+          } else {
+            setShowOnboarding(true); 
+          }
+          
+          // 執行流量統計
+          const statsRef = doc(db, "system", "stats");
+          if (!sessionStorage.getItem('hasVisited')) {
+            setDoc(statsRef, { views: increment(1) }, { merge: true }).catch(e => console.log("Stats update skipped"));
+            sessionStorage.setItem('hasVisited', 'true');
+          }
+          onSnapshot(statsRef, (snap) => snap.exists() && setVisitorCount(snap.data().views || 0));
+        } else {
+          setUser(null);
+          setUserProfile(null);
+          setShowOnboarding(false);
         }
-        onSnapshot(statsRef, (docSnap) => {
-          if (docSnap.exists()) setVisitorCount(docSnap.data().views || 0);
-        });
-      } catch (e) { console.error(e); }
-    };
-    trackVisitor();
+      } catch (err) {
+        console.error("Initialization Error:", err);
+      } finally {
+        // 無論成功或失敗，一定要關閉載入畫面
+        setLoading(false);
+      }
+    });
     return () => unsubscribe();
   }, []);
 
-  // 2. 監聽回條種類清單
+  // 2. 監聽回條種類
   useEffect(() => {
-    if (!user) return;
+    if (!user || showOnboarding) return;
     const q = query(collection(db, "users", user.uid, "receipts"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -59,64 +77,70 @@ function App() {
       if (data.length > 0 && !activeReceiptId) {
         setActiveReceiptId(data[data.length - 1].id);
       }
-    });
+    }, (err) => console.log("Receipts monitor error:", err));
     return () => unsubscribe();
-  }, [user]);
+  }, [user, showOnboarding]);
 
-  // 3. 監聽當前回條名單 & 同步標題
+  // 3. 監聽名單
   useEffect(() => {
-    if (!user || !activeReceiptId) {
+    if (!user || !activeReceiptId || showOnboarding) {
         setAllStudents([]);
-        setEventTitle("");
         return;
-    };
-
-    // 同步標題文字
-    const currentReceipt = receipts.find(r => r.id === activeReceiptId);
-    if (currentReceipt) setEventTitle(currentReceipt.name);
+    }
+    const current = receipts.find(r => r.id === activeReceiptId);
+    if (current) setLocalTitle(current.name);
 
     const q = query(collection(db, "users", user.uid, "students"), where("receiptId", "==", activeReceiptId));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      data.sort((a, b) => a.class === b.class ? a.no.localeCompare(b.no) : a.class.localeCompare(b.class, 'zh-Hant'));
+      data.sort((a, b) => a.class === b.class ? Number(a.no) - Number(b.no) : a.class.localeCompare(b.class, 'zh-Hant'));
       setAllStudents(data);
       if (isFirstLoadRef.current && data.length > 0) {
         setActiveClass(data[0].class);
         isFirstLoadRef.current = false;
       }
-    });
+    }, (err) => console.log("Students monitor error:", err));
     return () => unsubscribe();
-  }, [user, activeReceiptId, receipts]);
+  }, [user, activeReceiptId, showOnboarding]);
 
-  // --- 修改標題時即時同步回資料庫 ---
-  const handleUpdateTitle = async (newTitle) => {
-    setEventTitle(newTitle);
-    if (activeReceiptId) {
-      await updateDoc(doc(db, "users", user.uid, "receipts", activeReceiptId), { name: newTitle });
+  // 功能函式 (標題、上傳等)
+  const saveTitleToCloud = async () => {
+    if (activeReceiptId && localTitle) {
+      await updateDoc(doc(db, "users", user.uid, "receipts", activeReceiptId), { name: localTitle });
     }
   };
 
-  const handleDeleteReceipt = async (id, name) => {
-    if (!window.confirm(`確定要刪除「${name}」及其所有數據嗎？`)) return;
+  const handleProfileSubmit = async (e) => {
+    e.preventDefault();
+    if (!formData.schoolName) return alert("請輸入學校名稱");
     setIsUploading(true);
     try {
-        const q = query(collection(db, "users", user.uid, "students"), where("receiptId", "==", id));
-        const snapshot = await getDocs(q);
+      const data = { ...formData, email: user.email, displayName: user.displayName, createdAt: Date.now() };
+      await setDoc(doc(db, "user_profiles", user.uid), data);
+      setUserProfile(data);
+      setShowOnboarding(false);
+    } catch (err) { alert("儲存失敗，請檢查網路。"); } finally { setIsUploading(false); }
+  };
+
+  const handleBulkUpdate = async (status) => {
+    if (displayStudents.length === 0) return;
+    if (!window.confirm("確定更新所有人狀態？")) return;
+    setIsUploading(true);
+    try {
+      const batchSize = 500;
+      for (let i = 0; i < displayStudents.length; i += batchSize) {
         const batch = writeBatch(db);
-        snapshot.docs.forEach(d => batch.delete(d.ref));
+        displayStudents.slice(i, i + batchSize).forEach(s => batch.update(doc(db, "users", user.uid, "students", s.id), { isDone: status }));
         await batch.commit();
-        await deleteDoc(doc(db, "users", user.uid, "receipts", id));
-        setActiveReceiptId(null);
-        setActiveClass(null);
+      }
     } catch (err) { console.error(err); } finally { setIsUploading(false); }
   };
 
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const receiptName = window.prompt("請輸入回條名稱 (將作為標題與存檔名稱)", "新回條");
+    const receiptName = window.prompt("請輸入回條名稱", "新回條");
     if (!receiptName) return;
-
     setIsUploading(true);
     isFirstLoadRef.current = true;
     const reader = new FileReader();
@@ -126,20 +150,17 @@ function App() {
         await setDoc(doc(db, "users", user.uid, "receipts", receiptId), { name: receiptName, createdAt: Date.now() });
         const workbook = XLSX.read(new Uint8Array(event.target.result), { type: 'array' });
         let allEntries = [];
-        workbook.SheetNames.forEach(sheetName => {
-          const json = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
-          json.forEach((row, i) => {
-            const studentName = String(row['姓名'] || row['學生姓名'] || '未知').trim();
-            const studentNo = String(row['座號'] || (i + 1)).padStart(2, '0');
-            const originalClass = String(row['班級'] || '').trim();
+        workbook.SheetNames.forEach(name => {
+          XLSX.utils.sheet_to_json(workbook.Sheets[name]).forEach((row, i) => {
+            let studentName = String(row['姓名'] || row['學生姓名'] || '未知').trim();
+            let studentNo = String(row['座號'] || (i + 1)).padStart(2, '0');
+            let studentClass = String(row['班級'] || '').trim();
+            let groupLabel = name;
             let finalNo = studentNo;
-            let groupLabel = sheetName;
-            if (row['社團'] || row['社團名稱'] || row['類別']) {
-                groupLabel = row['社團'] || row['社團名稱'] || row['類別'];
-                finalNo = originalClass ? `${originalClass}-${studentNo}` : studentNo;
-            } else {
-                groupLabel = originalClass || sheetName;
-            }
+            if (row['社團'] || row['類別']) {
+                groupLabel = row['社團'] || row['類別'];
+                finalNo = studentClass ? `${studentClass}-${studentNo}` : studentNo;
+            } else { groupLabel = studentClass || name; }
             allEntries.push({ receiptId, class: String(groupLabel).trim(), no: finalNo, name: studentName, isDone: false, note: '' });
           });
         });
@@ -149,7 +170,6 @@ function App() {
           await batch.commit();
         }
         setActiveReceiptId(receiptId);
-        setEventTitle(receiptName); // 同步更新畫面上方標題
       } catch (err) { alert("上傳失敗"); } finally { setIsUploading(false); }
     };
     reader.readAsArrayBuffer(file);
@@ -158,73 +178,72 @@ function App() {
 
   const classList = useMemo(() => [...new Set(allStudents.map(s => s.class))].sort(), [allStudents]);
   const handleGradeClick = (grade) => { setExpandedGrade(expandedGrade === grade ? null : grade); setActiveClass(null); };
-  const getGradeGroup = (className) => {
-    if (!className) return "其他";
-    const name = String(className).trim();
-    if (/^[123]\d{2}$/.test(name)) {
-      if (name.startsWith('1')) return "高一";
-      if (name.startsWith('2')) return "高二";
-      if (name.startsWith('3')) return "高三";
-    }
-    return "其他";
-  };
-
-  const displayStudents = useMemo(() => {
-    if (expandedGrade === "全校") return allStudents;
-    return activeClass ? allStudents.filter(s => s.class === activeClass) : [];
-  }, [allStudents, expandedGrade, activeClass]);
-
+  const getGradeGroup = (c) => { if (!c) return "其他"; return /^[123]\d{2}$/.test(c) ? (c.startsWith('1') ? "高一" : c.startsWith('2') ? "高二" : "高三") : "其他"; };
+  const displayStudents = useMemo(() => expandedGrade === "全校" ? allStudents : (activeClass ? allStudents.filter(s => s.class === activeClass) : []), [allStudents, expandedGrade, activeClass]);
   const unsubmittedStudents = displayStudents.filter(s => !s.isDone);
   const doneCount = displayStudents.length - unsubmittedStudents.length;
   const total = displayStudents.length;
 
-  if (loading) return <div className="h-screen flex items-center justify-center bg-[#C3CCD8] font-bold tracking-widest text-slate-500 animate-pulse">系統啟動中...</div>;
+  if (loading) return (
+    <div className="h-screen w-screen bg-[#C3CCD8] flex flex-col items-center justify-center font-black text-slate-500">
+      <Loader2 className="animate-spin mb-4 text-slate-400" size={48} />
+      <p className="tracking-widest">系統連線中...</p>
+    </div>
+  );
 
   if (!user) return (
     <div className="h-screen flex items-center justify-center bg-[#C3CCD8]">
       <div className="bg-white p-12 rounded-2xl shadow-2xl text-center border-t-8 border-slate-700">
         <FileText size={64} className="mx-auto text-blue-500 mb-6" />
-        <h1 className="text-3xl font-black text-slate-700 mb-8">學生回條回收系統</h1>
+        <h1 className="text-3xl font-black text-slate-700 mb-8 tracking-tighter">學生回條回收系統</h1>
         <button onClick={() => signInWithPopup(auth, googleProvider)} className="bg-slate-800 text-white px-10 py-4 rounded-xl font-bold shadow-lg hover:bg-black transition active:scale-95">Google 快速登入</button>
+      </div>
+    </div>
+  );
+
+  if (showOnboarding) return (
+    <div className="h-screen w-screen bg-[#C3CCD8] flex items-center justify-center p-4">
+      <div className="bg-white w-full max-w-lg rounded-[2.5rem] shadow-2xl p-10 border border-white">
+        <div className="flex flex-col items-center text-center mb-8">
+          <div className="bg-blue-100 p-4 rounded-3xl text-blue-600 mb-4"><GraduationCap size={48} /></div>
+          <h2 className="text-3xl font-black text-slate-800 mb-2">歡迎使用系統</h2>
+          <p className="text-slate-400 font-bold">請填寫資訊以開啟管理功能</p>
+        </div>
+        <form onSubmit={handleProfileSubmit} className="space-y-5">
+          <input required type="text" placeholder="學校全稱 (如：國立鳳山高中)" value={formData.schoolName} onChange={(e) => setFormData({...formData, schoolName: e.target.value})} className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 font-bold outline-none focus:border-blue-500 transition-all" />
+          <select value={formData.region} onChange={(e) => setFormData({...formData, region: e.target.value})} className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl px-6 py-4 font-bold outline-none cursor-pointer">
+            {["台北市", "新北市", "基隆市", "桃園市", "新竹市", "新竹縣", "苗栗國", "台中市", "彰化縣", "南投縣", "雲林縣", "嘉義市", "嘉義縣", "台南市", "高雄市", "屏東縣", "宜蘭縣", "花蓮國", "台東縣", "澎湖縣", "金門縣", "馬祖"].map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+          <div className="grid grid-cols-2 gap-3">
+            {["導師", "行政承辦人"].map(r => (
+              <button type="button" key={r} onClick={() => setFormData({...formData, role: r})} className={`py-4 rounded-2xl font-black text-sm border-2 transition-all ${formData.role === r ? 'bg-blue-600 border-blue-600 text-white shadow-lg' : 'bg-white border-slate-100 text-slate-400'}`}>{r}</button>
+            ))}
+          </div>
+          <button type="submit" className="w-full bg-slate-800 text-white py-5 rounded-[2rem] font-black text-lg hover:bg-black transition shadow-xl mt-4 active:scale-95">進入系統</button>
+        </form>
       </div>
     </div>
   );
 
   return (
     <div className="flex h-screen w-screen bg-[#C3CCD8] overflow-hidden font-sans text-slate-800">
-      
-      {/* 左側：名單區 */}
       <main className="flex-1 flex flex-col h-full overflow-hidden p-5 lg:p-6 gap-4">
-        
-        {/* 1. 標題編輯區 (已修正排列順序) */}
         <div className="flex-none bg-white border border-slate-400 p-4 lg:p-6 shadow-sm flex items-center justify-center gap-4 rounded-sm">
-          {/* 鋼筆圖示 */}
           <PencilLine className="text-slate-200" size={36} />
           <div className="flex items-center gap-2">
-            {/* 活動名稱輸入框 */}
-            <input 
-              type="text" 
-              value={eventTitle} 
-              onChange={(e) => handleUpdateTitle(e.target.value)} 
-              placeholder="點此輸入活動名稱" 
-              className="text-4xl lg:text-5xl font-serif text-slate-700 bg-transparent focus:outline-none border-b border-transparent hover:border-slate-200 transition-all text-center min-w-[200px] font-bold" 
-            />
-            {/* 固定文字 */}
-            <span className="text-4xl lg:text-5xl font-serif text-slate-700 whitespace-nowrap font-bold">回條清單</span>
+            <input type="text" value={localTitle} onChange={(e) => setLocalTitle(e.target.value)} onBlur={saveTitleToCloud} onKeyDown={(e) => e.key === 'Enter' && saveTitleToCloud()} placeholder="活動名稱" className="text-4xl lg:text-5xl font-serif text-slate-700 bg-transparent focus:outline-none border-b border-transparent hover:border-slate-200 transition-all text-center min-w-[150px] font-bold" />
+            <span className="text-4xl lg:text-5xl font-serif text-slate-800 whitespace-nowrap font-bold">回條清單</span>
           </div>
         </div>
 
-        {/* 2. 管理區域 (年級、選單、刪除) */}
         <div className="flex flex-col gap-2 flex-none no-print">
           <div className="flex gap-2 justify-center items-center">
             {["高一", "高二", "高三", "其他", "全校"].map(g => (
-              <button key={g} onClick={() => handleGradeClick(g)} className={`px-8 py-2.5 rounded-xl font-black text-base flex items-center gap-2 transition-all ${expandedGrade === g ? 'bg-[#5B6B7E] text-white shadow-md scale-105' : 'bg-[#95A3B5] text-slate-100 hover:bg-slate-200/50'}`}>
+              <button key={g} onClick={() => handleGradeClick(g)} className={`px-8 py-2.5 rounded-xl font-black text-base flex items-center gap-2 transition-all ${expandedGrade === g ? 'bg-[#5B6B7E] text-white shadow-md scale-105' : 'bg-[#95A3B5] text-slate-100'}`}>
                 {g} {g !== "全校" && (expandedGrade === g ? <ChevronUp size={16}/> : <ChevronDown size={16}/>)}
               </button>
             ))}
-            
             <div className="mx-2 h-10 w-[1px] bg-slate-400 opacity-40"></div>
-
             <div className="flex flex-col gap-1 min-w-[180px]">
               <div className="flex items-center bg-white/60 px-2 py-1 rounded-lg border border-slate-400 shadow-sm">
                 <ListFilter size={14} className="text-slate-500 mr-1"/>
@@ -234,11 +253,21 @@ function App() {
                 </select>
               </div>
               {activeReceiptId && (
-                <button onClick={() => handleDeleteReceipt(activeReceiptId, eventTitle)} className="text-[10px] font-bold text-slate-500 hover:text-red-600 transition flex items-center justify-center gap-1 tracking-tighter"><Trash2 size={10}/> 刪除此份回條及其數據</button>
+                <button onClick={() => {
+                  if (window.confirm(`確定刪除「${localTitle}」？`)) {
+                    setIsUploading(true);
+                    const q = query(collection(db, "users", user.uid, "students"), where("receiptId", "==", activeReceiptId));
+                    getDocs(q).then(s => {
+                      const b = writeBatch(db);
+                      s.docs.forEach(d => b.delete(d.ref));
+                      return b.commit();
+                    }).then(() => deleteDoc(doc(db, "users", user.uid, "receipts", activeReceiptId)))
+                    .then(() => { setActiveReceiptId(null); setActiveClass(null); setIsUploading(false); });
+                  }
+                }} className="text-[10px] font-bold text-slate-500 hover:text-red-600 transition flex items-center justify-center gap-1 tracking-tighter"><Trash2 size={10}/> 刪除此回條及數據</button>
               )}
             </div>
           </div>
-
           {expandedGrade && expandedGrade !== "全校" && (
             <div className="p-2.5 bg-[#AEB9C8]/50 rounded-2xl border border-white/20 flex flex-wrap gap-2 justify-center animate-in fade-in slide-in-from-top-2">
               {classList.filter(cls => getGradeGroup(cls) === expandedGrade).map(cls => (
@@ -250,22 +279,29 @@ function App() {
           )}
         </div>
 
-        {/* 3. 學生表格區 */}
         <div className="flex-1 overflow-y-auto custom-scrollbar bg-white border border-slate-400 rounded-sm shadow-xl">
           {activeReceiptId && (activeClass || expandedGrade === "全校") ? (
-            <table className="w-full border-collapse">
+            <table className="w-full border-collapse text-slate-800">
               <thead className="bg-[#F2C2C2] sticky top-0 z-20 shadow-sm text-sm font-bold">
                 <tr className="text-slate-700 border-b">
                   <th className="p-3 w-20 border-r">班級</th>
                   <th className="p-3 w-24 border-r">座號</th>
                   <th className="p-3 text-left pl-8 border-r">姓名</th>
-                  <th className="p-3 w-44 text-center border-r">繳交狀態</th>
+                  <th className="p-3 w-44 text-center border-r">
+                    <div className="flex flex-col items-center gap-1.5">
+                       <span className="text-xs font-black">繳交狀態</span>
+                       <div className="flex gap-2 no-print">
+                          <button onClick={() => handleBulkUpdate(true)} className="bg-green-600 text-white text-[10px] px-2 py-0.5 rounded shadow-sm font-black">全交</button>
+                          <button onClick={() => handleBulkUpdate(false)} className="bg-red-600 text-white text-[10px] px-2 py-0.5 rounded shadow-sm font-black">清空</button>
+                       </div>
+                    </div>
+                  </th>
                   <th className="p-3">備註</th>
                 </tr>
               </thead>
               <tbody>
                 {displayStudents.map((s) => (
-                  <tr key={s.id} className="hover:bg-slate-50 border-b border-slate-200 h-11 transition-colors text-slate-800">
+                  <tr key={s.id} className="hover:bg-slate-50 border-b h-11 transition-colors">
                     <td className="text-center font-bold text-slate-500 border-r">{s.class}</td>
                     <td className="text-center font-bold text-slate-400 border-r tracking-tighter">{s.no}</td>
                     <td className={`font-bold pl-8 text-xl border-r ${s.isDone ? 'text-slate-300 font-normal' : 'text-slate-700'}`}>{s.name}</td>
@@ -285,22 +321,21 @@ function App() {
               </tbody>
             </table>
           ) : (
-            <div className="h-full flex items-center justify-center text-slate-300 font-bold italic text-xl p-10 text-center">請選取班級名單</div>
+            <div className="h-full flex items-center justify-center text-slate-300 font-bold italic text-xl p-10 text-center tracking-tighter">請選取年級標籤後，再點選班級</div>
           )}
         </div>
       </main>
 
-      {/* 右側：側邊欄 (固定統計欄位) */}
       <aside className="w-[420px] h-full bg-[#AEB9C8] border-l border-slate-300 p-6 flex flex-col items-center gap-4 shadow-2xl flex-none no-print overflow-hidden">
-        <div className="flex flex-col w-full gap-2.5 flex-none">
-          <div className="bg-white border border-slate-400 px-4 py-2.5 rounded-xl shadow-md text-sm font-black flex justify-between items-center">
-            <span className="truncate mr-2 flex items-center gap-2"><User size={18} className="text-slate-500"/> {user.displayName}</span>
-            <button onClick={() => signOut(auth)} className="text-red-500 underline text-xs font-bold tracking-tight">登出</button>
+        <div className="flex flex-col w-full gap-2.5">
+          <div className="bg-white border border-slate-400 px-4 py-2.5 rounded-xl shadow-md text-sm font-black flex justify-between items-center tracking-tight">
+            <span className="truncate mr-2 flex items-center gap-2 font-black text-slate-700 text-sm"><User size={18} className="text-slate-500"/> {userProfile?.schoolName || user.displayName}</span>
+            <button onClick={() => signOut(auth)} className="text-red-500 underline text-xs font-bold">登出</button>
           </div>
           <label className="bg-slate-800 text-white w-full py-3.5 rounded-xl text-center font-black text-lg cursor-pointer hover:bg-black transition-all shadow-lg flex items-center justify-center gap-3">
             <Upload size={22}/> 匯入新回條名單 <input type="file" onChange={handleFileUpload} className="hidden" />
           </label>
-          <button onClick={() => toPng(reportRef.current, { backgroundColor: '#ffffff', cacheBust: true, pixelRatio: 2 }).then(u=>{const a=document.createElement('a');a.download=`${eventTitle}_未繳名單.png`;a.href=u;a.click();})} className="bg-white border-2 border-indigo-800 w-full py-3.5 rounded-xl text-center font-black text-lg text-indigo-900 flex items-center justify-center gap-3 shadow-md hover:bg-indigo-50 active:scale-95 transition-all">
+          <button onClick={() => toPng(reportRef.current, { backgroundColor: '#ffffff', cacheBust: true, pixelRatio: 2 }).then(u=>{const a=document.createElement('a');a.download=`未繳名單.png`;a.href=u;a.click();})} className="bg-white border-2 border-indigo-800 w-full py-3.5 rounded-xl text-center font-black text-lg text-indigo-900 flex items-center justify-center gap-3 shadow-md hover:bg-indigo-50">
             <Camera size={22}/> 另存未繳報表
           </button>
         </div>
@@ -310,7 +345,7 @@ function App() {
           <span className="text-[10px] tracking-widest uppercase text-slate-600 font-black">Traffic: {visitorCount}</span>
         </div>
 
-        <div className="bg-[#95A3B5] px-10 py-2.5 rounded-xl text-white font-black text-lg shadow-sm border border-slate-300 w-full text-center truncate tracking-tight">
+        <div className="bg-[#95A3B5] px-10 py-2.5 rounded-xl text-white font-black text-lg shadow-sm border border-slate-300 w-full text-center truncate tracking-tighter">
           {activeClass || "---"} 回收進度
         </div>
 
@@ -322,24 +357,23 @@ function App() {
           </div>
         </div>
 
-        <div className="w-full space-y-2.5 px-4 flex-none font-bold text-slate-800">
+        <div className="w-full space-y-2.5 px-4 flex-none font-bold text-slate-800 text-sm">
           <div className="border border-slate-600 p-3 rounded-xl bg-white/30 flex justify-between items-center shadow-md border-l-8 border-l-emerald-500 transition-all"><span className="text-md">已繳交：</span><span className="text-2xl font-black">{doneCount}</span></div>
-          <div className="border border-slate-600 p-3 rounded-xl bg-white/30 flex justify-between items-center shadow-md border-l-8 border-l-red-500 text-red-800 transition-all"><span className="text-md font-black">未繳交：</span><span className="text-2xl font-black">{total - doneCount}</span></div>
+          <div className="border border-slate-600 p-3 rounded-xl bg-white/30 flex justify-between items-center shadow-md border-l-8 border-l-red-500 text-red-800 tracking-tighter"><span className="text-md font-black">未繳交：</span><span className="text-2xl font-black">{total - doneCount}</span></div>
         </div>
 
         <div className="w-full mt-auto">
-          <div className="bg-[#5B6B7E]/20 p-4 rounded-xl border border-slate-400/50 w-full flex flex-col items-center gap-1.5 shadow-inner">
+          <div className="bg-[#5B6B7E]/20 p-4 rounded-xl border border-slate-400/50 w-full flex flex-col items-center gap-1 shadow-inner">
             <ShieldCheck size={20} className="text-[#5B6B7E] opacity-80" />
             <p className="text-[12px] font-black text-slate-800 leading-tight text-center tracking-tighter">國立鳳山高中曾耀毅老師製作與授權使用</p>
-            <p className="text-[8px] text-slate-500 font-bold opacity-60 uppercase mt-1 tracking-widest">Education System v5.9 | © 2025</p>
+            <p className="text-[8px] text-slate-500 font-bold opacity-60 uppercase mt-1 tracking-widest">Education System v6.2 | © 2025</p>
           </div>
         </div>
       </aside>
 
-      {/* 隱藏報表容器 */}
       <div style={{ position: 'absolute', left: '-9999px', top: '0' }}>
         <div ref={reportRef} style={{ width: '800px', padding: '50px', backgroundColor: '#ffffff', fontFamily: 'sans-serif' }}>
-          <h2 style={{ textAlign: 'center', fontSize: '32px', marginBottom: '10px', color: '#1e293b', fontWeight: '900' }}>{eventTitle} 回條清單</h2>
+          <h2 style={{ textAlign: 'center', fontSize: '32px', marginBottom: '10px', color: '#1e293b', fontWeight: '900' }}>{localTitle} 回條清單</h2>
           <h3 style={{ textAlign: 'center', fontSize: '20px', marginBottom: '30px', color: '#64748b', borderBottom: '3px solid #f1f5f9', paddingBottom: '15px' }}>【{activeClass || '全校'}】未繳交名單統計</h3>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px' }}>
             {unsubmittedStudents.map(s => (
@@ -354,9 +388,9 @@ function App() {
       </div>
 
       {isUploading && (
-        <div className="fixed inset-0 z-[100] bg-slate-900/60 backdrop-blur-md flex flex-col items-center justify-center text-white font-bold p-8 text-center">
+        <div className="fixed inset-0 z-[100] bg-slate-900/60 backdrop-blur-md flex flex-col items-center justify-center text-white font-bold p-8">
            <Loader2 className="animate-spin mb-4" size={56} />
-           <p className="text-xl font-black tracking-widest uppercase italic tracking-tighter">Syncing Database...</p>
+           <p className="text-xl font-black tracking-widest uppercase tracking-tighter">Updating Database...</p>
         </div>
       )}
     </div>
